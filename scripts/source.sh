@@ -49,7 +49,7 @@ for file in $found; do
 done
 (cd "$src" && cargo about generate --config "$repo/licensing/about.toml" --locked \
     --output-file "$licenses/THIRD-PARTY-LICENSES.html" "$repo/licensing/third-party-licenses.hbs")
-cp "$repo"/licensing/runtime/*"$licenses/"
+cp "$repo"/licensing/runtime/* "$licenses/"
 
 # The build scripts belong to the Corresponding Source as well.
 mkdir -p "$out/build"
