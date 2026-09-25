@@ -1,0 +1,12 @@
+# Build output of scripts/source.sh and scripts/build.sh — binaries ship as release
+# assets, never through git.
+/out/
+/work/
+*.crate
+*.tar.gz
+*.sha256
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

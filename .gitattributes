@@ -1,0 +1,2 @@
+# The repository stores LF; this rule travels with it, so every clone agrees.
+* text=auto eol=lf
