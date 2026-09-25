@@ -1,0 +1,164 @@
+# Build what the releases lack (scripts/plan.sh): a new crate version gets its source
+# laid out, its binaries built and a release created; a release that exists gains only
+# its missing archives, built from the source archive already published there. Nothing
+# published is ever rebuilt or replaced.
+name: Build
+
+on:
+  push:
+    branches: [trunk]
+    paths:
+      - manifest/**
+      - scripts/**
+      - licensing/**
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      sources: ${{ steps.plan.outputs.sources }}
+      builds: ${{ steps.plan.outputs.builds }}
+      releases: ${{ steps.plan.outputs.releases }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: List the archives the releases lack
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          plan=$(sh scripts/plan.sh)
+          echo "$plan"
+          for key in sources builds releases; do
+            echo "$key=$(jq --compact-output ".$key" <<<"$plan")" >>"$GITHUB_OUTPUT"
+          done
+
+  source:
+    needs: plan
+    if: needs.plan.outputs.sources != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        crate: ${{ fromJSON(needs.plan.outputs.sources) }}
+    env:
+      NAME: ${{ matrix.crate.name }}
+      VERSION: ${{ matrix.crate.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --version 0.9.2 --locked --features cli
+
+      - name: Lay out the Corresponding Source
+        run: sh scripts/source.sh "$NAME" "$VERSION" out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-${{ matrix.crate.name }}-${{ matrix.crate.version }}
+          # The archive, not the unpacked tree: the upload drops hidden files, and
+          # the vendored sources depend on .cargo/ and .cargo-checksum.json.
+          path: |
+            out/${{ matrix.crate.name }}-${{ matrix.crate.version }}-source.tar.gz
+            out/${{ matrix.crate.name }}-${{ matrix.crate.version }}.crate
+            out/licenses/
+          retention-days: 1
+
+  build:
+    needs: [plan, source]
+    # Runs when source was skipped as well — a new target needs no new source.
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.builds != '[]' }}
+    runs-on: ${{ matrix.build.runner }}
+    strategy:
+      matrix:
+        build: ${{ fromJSON(needs.plan.outputs.builds) }}
+    env:
+      NAME: ${{ matrix.build.name }}
+      VERSION: ${{ matrix.build.version }}
+      TARGET: ${{ matrix.build.target }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fetch the source from this run
+        if: ${{ !matrix.build.released }}
+        uses: actions/download-artifact@v8
+        with:
+          name: source-${{ matrix.build.name }}-${{ matrix.build.version }}
+          path: out
+
+      - name: Fetch the source the release already ships
+        if: ${{ matrix.build.released }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$NAME-$VERSION"
+          gh release download "$tag" --dir out --pattern "$tag-source.tar.gz" --pattern "$tag-licenses.tar.gz"
+          tar --extract --gzip --file "out/$tag-licenses.tar.gz" --directory out
+
+      - name: Install rustup where the runner image lacks it
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs |
+              sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+          fi
+
+      - name: Build offline from the source archive
+        run: sh scripts/build.sh "$NAME" "$VERSION" "$TARGET" out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.build.name }}-${{ matrix.build.version }}-${{ matrix.build.target }}
+          path: |
+            out/${{ matrix.build.name }}-${{ matrix.build.version }}-${{ matrix.build.target }}.tar.gz
+            out/${{ matrix.build.name }}-${{ matrix.build.version }}-${{ matrix.build.target }}.tar.gz.sha256
+          retention-days: 1
+
+  release:
+    needs: [plan, build]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.releases != '[]' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        crate: ${{ fromJSON(needs.plan.outputs.releases) }}
+    env:
+      NAME: ${{ matrix.crate.name }}
+      VERSION: ${{ matrix.crate.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: build-${{ matrix.crate.name }}-${{ matrix.crate.version }}-*
+          merge-multiple: true
+          path: dist
+
+      - name: Add the new archives to the release
+        if: ${{ matrix.crate.released }}
+        # No --clobber: an asset that exists already makes the upload fail.
+        run: gh release upload "$NAME-$VERSION" dist/* --repo "$GITHUB_REPOSITORY"
+
+      - name: Fetch the source from this run
+        if: ${{ !matrix.crate.released }}
+        uses: actions/download-artifact@v8
+        with:
+          name: source-${{ matrix.crate.name }}-${{ matrix.crate.version }}
+          path: source
+
+      - name: Publish the release
+        if: ${{ !matrix.crate.released }}
+        run: |
+          tag="$NAME-$VERSION"
+          cp "source/$tag.crate" "source/$tag-source.tar.gz" dist/
+          tar --create --gzip --file "dist/$tag-licenses.tar.gz" --directory source licenses
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --title "$NAME $VERSION" \
+            --notes "Unmodified build of \`$NAME\` $VERSION as published on crates.io, compiled with \`--locked --offline\` from the vendored sources.
+
+          **Corresponding Source:** \`$tag-source.tar.gz\` — the crate, its vendored dependencies and the build scripts. \`$tag.crate\` is the crate exactly as crates.io serves it. Every binary in this release is built from that archive.
+
+          **Licences:** every archive carries \`licenses/\` — the licence of \`$NAME\`, the notices of every statically linked dependency, musl and the Rust standard library. The same files ship as \`$tag-licenses.tar.gz\`."
