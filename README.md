@@ -77,6 +77,3 @@ The workflow runs three scripts, in this order — each also runs on its own, on
 | `scripts/plan.sh` | Lists the archives the releases lack |
 | `scripts/source.sh <crate> <version> <out>` | Fetches the crate, checks it against the crates.io index, vendors its dependencies, collects the licences, packs the source archive |
 | `scripts/build.sh <crate> <version> <target> <out>` | Unpacks that source archive and builds from it offline — the binary provably comes from the source that ships |
-
-`source.sh` needs `cargo-about`; `plan.sh` needs `gh` inside a checkout of this
-repository.
